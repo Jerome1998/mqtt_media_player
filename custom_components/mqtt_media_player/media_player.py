@@ -63,6 +63,7 @@ class MQTTMediaPlayer(MediaPlayerEntity):
         self._position = None
         self._available = None
         self._media_type = "music"
+        self._mute = None
         self._subscribed = []
         self._config_unsubscribe = None
         self._availability_topics = {}
@@ -200,11 +201,13 @@ class MQTTMediaPlayer(MediaPlayerEntity):
             "duration_topic": config.get("state_duration_topic"),
             "position_topic": config.get("state_position_topic"),
             "volume_topic": config.get("state_volume_topic"),
+            "mute_topic": config.get("state_mute_topic"),
             "albumart_topic": config.get("state_albumart_topic"),
             "mediatype_topic": config.get("state_mediatype_topic"),
         }
         self._cmd_topics = {
             "volumeset_topic": config.get("command_volume_topic"),
+            "muteset_topic": config.get("command_mute_topic"),
             "play_topic": config.get("command_play_topic"),
             "play_payload": config.get("command_play_payload", "Play"),
             "pause_topic": config.get("command_pause_topic"),
@@ -238,6 +241,8 @@ class MQTTMediaPlayer(MediaPlayerEntity):
             self._subscribed.append(await async_subscribe(self._hass, check_topic, self.handle_position))
         if (check_topic := self._state_topics["volume_topic"]) is not None:
             self._subscribed.append(await async_subscribe(self._hass, check_topic, self.handle_volume))
+        if (check_topic := self._state_topics["mute_topic"]) is not None:
+            self._subscribed.append(await async_subscribe(self._hass, check_topic, self.handle_mute))
         if (check_topic := self._state_topics["albumart_topic"]) is not None:
             self._subscribed.append(await async_subscribe(self._hass, check_topic, self.handle_albumart))
         if (check_topic := self._state_topics["mediatype_topic"]) is not None:
@@ -264,6 +269,8 @@ class MQTTMediaPlayer(MediaPlayerEntity):
                 MediaPlayerEntityFeature.VOLUME_SET
                 | MediaPlayerEntityFeature.VOLUME_STEP
             )
+        if self._cmd_topics.get("muteset_topic"):
+            features |= MediaPlayerEntityFeature.VOLUME_MUTE
         if self._cmd_topics.get("playmedia_topic"):
             features |= MediaPlayerEntityFeature.PLAY_MEDIA
         return features
@@ -289,6 +296,10 @@ class MQTTMediaPlayer(MediaPlayerEntity):
     @property
     def volume_level(self):
         return self._volume
+
+    @property
+    def is_volume_muted(self):
+        return self._mute
 
     @property
     def media_title(self):
@@ -396,6 +407,16 @@ class MQTTMediaPlayer(MediaPlayerEntity):
                 _LOGGER.debug("Invalid volume payload received for %s: %s", self.name, message.payload)
         self.async_write_ha_state()
 
+    async def handle_mute(self, message):
+        """Update the mute state based on the MQTT mute topic."""
+        if message.payload.strip().lower() == "mute":
+            self._mute = True
+        elif message.payload.strip().lower() == "unmute":
+            self._mute = False
+        else:
+            _LOGGER.debug("Ignoring invalid mute payload: %s", message.payload)
+        self.async_write_ha_state()
+
     async def handle_albumart(self, message):
         """Update the album art based on the MQTT album art topic."""
         if not message.payload or not message.payload.strip():
@@ -438,6 +459,15 @@ class MQTTMediaPlayer(MediaPlayerEntity):
         if topic := self._cmd_topics.get("volumeset_topic"):
             self._volume = round(float(volume), 2)
             await async_publish(self._hass, topic, self._volume)
+
+    async def async_mute_volume(self, mute):
+        """Mute or unmute the volume via MQTT."""
+        if mute:
+            payload = "mute"
+        else:
+            payload = "unmute"
+        if topic := self._cmd_topics.get("muteset_topic"):
+            await async_publish(self._hass, topic, payload)
 
     async def async_play_media(self, media_type, media_id, **kwargs):
         """Sends media to play."""
