@@ -15,6 +15,8 @@ from homeassistant.components.mqtt import (
     async_publish,
     async_wait_for_mqtt_client,
 )
+from homeassistant.helpers import entity_registry as er
+from . import entry_device_id
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -26,31 +28,39 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
         _LOGGER.error("MQTT integration is not available, make sure MQTT is set up correctly")
         return False
 
-    player = MQTTMediaPlayer(hass, config_entry)
-    async_add_entities([player])
-
-    # Subscribe to the config topic to get media player configuration dynamically
     # Use the discovery topic if available, otherwise construct a wildcard pattern
     if "discovery_topic" in config_entry.data:
         CONFIG_TOPIC = config_entry.data["discovery_topic"]
     else:
         # For manually added devices, use a wildcard to catch any path structure
-        device_id = config_entry.title
         # This will match both homeassistant/media_player/my_player/config
         # and homeassistant/media_player/lnxlink/my_player/config
         CONFIG_TOPIC = f"homeassistant/media_player/#"
 
-    unsubscribe_config = await async_subscribe(hass, CONFIG_TOPIC, player.handle_config)
-    player.set_config_unsubscribe(unsubscribe_config)
+    # The entity's unique ID used to be the entry title, so renaming the entry in
+    # the UI created a new entity and orphaned the old one. Move an entity still
+    # keyed on the title to the device ID so it keeps its entity ID and history.
+    device_id = entry_device_id(config_entry)
+    if config_entry.title != device_id:
+        registry = er.async_get(hass)
+        old_entity_id = registry.async_get_entity_id("media_player", DOMAIN, config_entry.title)
+        if old_entity_id and not registry.async_get_entity_id("media_player", DOMAIN, device_id):
+            registry.async_update_entity(old_entity_id, new_unique_id=device_id)
+
+    # The config topic subscription is made in async_added_to_hass
+    player = MQTTMediaPlayer(hass, config_entry, CONFIG_TOPIC)
+    async_add_entities([player])
 
 
 class MQTTMediaPlayer(MediaPlayerEntity):
     """Representation of a MQTT Media Player."""
 
-    def __init__(self, hass, config_entry):
+    def __init__(self, hass, config_entry, config_topic):
         """Initialize the MQTT Media Player."""
         self._hass = hass
         self._config_entry = config_entry
+        self._config_topic = config_topic
+        self._device_id = entry_device_id(config_entry)
         self._name = None
         self._state = None
         self._volume = 0.0
@@ -76,9 +86,17 @@ class MQTTMediaPlayer(MediaPlayerEntity):
             if "name" in disc_data:
                 self._name = disc_data.get("name")
 
-    def set_config_unsubscribe(self, unsubscribe_callback):
-        """Set the unsubscribe callback for the config topic."""
-        self._config_unsubscribe = unsubscribe_callback
+    async def async_added_to_hass(self):
+        """Subscribe to the config topic to get media player configuration dynamically.
+
+        Home Assistant removes and re-adds the entity when its entity ID is changed,
+        so this must run on every add rather than once in async_setup_entry. The
+        config topic is retained, so resubscribing replays it and handle_config
+        restores the state topic subscriptions.
+        """
+        self._config_unsubscribe = await async_subscribe(
+            self._hass, self._config_topic, self.handle_config
+        )
 
     async def async_will_remove_from_hass(self):
         """Unsubscribe from MQTT topics when entity is removed."""
@@ -133,7 +151,7 @@ class MQTTMediaPlayer(MediaPlayerEntity):
         topic_device_id = topic_parts[-2]  # Get the part before '/config'
 
         # Only process if this message is for our device
-        if topic_device_id != self._config_entry.title:
+        if topic_device_id != self._device_id:
             _LOGGER.debug(f"Ignoring config for different device: {topic_device_id}")
             return
 
@@ -239,7 +257,7 @@ class MQTTMediaPlayer(MediaPlayerEntity):
 
     @property
     def unique_id(self):
-        return self._config_entry.title
+        return self._device_id
 
     @property
     def state(self):

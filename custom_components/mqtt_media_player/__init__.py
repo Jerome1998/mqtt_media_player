@@ -15,6 +15,15 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.MEDIA_PLAYER]
 
+def entry_device_id(entry: ConfigEntry) -> str:
+    """Return the device ID (the discovery topic segment before /config) for an entry.
+
+    The entry title starts out as the device ID but can be renamed in the UI, so it
+    must not be used to identify the device. The unique ID and data["name"] are set
+    to the device ID when the entry is created and never change.
+    """
+    return entry.unique_id or entry.data.get("name") or entry.title
+
 async def async_setup(hass: HomeAssistant, config: dict):
     """Set up the integration using YAML (if needed)."""
     if not await async_wait_for_mqtt_client(hass):
@@ -49,7 +58,7 @@ async def async_setup(hass: HomeAssistant, config: dict):
             # Check if this device is already configured
             current_entries = hass.config_entries.async_entries(DOMAIN)
             for entry in current_entries:
-                if entry.title == device_id:
+                if entry_device_id(entry) == device_id:
                     _LOGGER.debug(f"Device {device_id} already configured")
                     return
             
@@ -79,7 +88,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    """Handle removal of the integration."""
+    """Unload a config entry."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry):
+    """Handle removal of the integration.
+
+    Clearing the retained discovery config must happen here rather than in
+    async_unload_entry, which also runs on every reload: clearing it there
+    leaves the reloaded entity with no config to resubscribe from until the
+    device republishes discovery.
+    """
     
     # Clear the MQTT config by publishing empty payload
     if "discovery_topic" in entry.data:
@@ -88,7 +107,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     else:
         # Construct the config topic for manually added devices
         # Try to find any matching config topic by publishing to a general pattern
-        config_topic = f"homeassistant/media_player/{entry.title}/config"
+        config_topic = f"homeassistant/media_player/{entry_device_id(entry)}/config"
     
     if await async_wait_for_mqtt_client(hass):
         try:
@@ -96,5 +115,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
             _LOGGER.info(f"Cleared MQTT config for {entry.title} at {config_topic}")
         except Exception as e:
             _LOGGER.error(f"Failed to clear MQTT config: {e}")
-    
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
